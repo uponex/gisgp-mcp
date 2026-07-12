@@ -10,7 +10,7 @@ Free remote MCP (Model Context Protocol) server for GIS/ArcGIS Online automation
 { "mcpServers": { "gisgp": { "url": "https://gisgp.com/mcp" } } }
 ```
 
-## Tools (12)
+## Tools (25)
 
 | Tool | Description |
 |---|---|
@@ -26,5 +26,18 @@ Free remote MCP (Model Context Protocol) server for GIS/ArcGIS Online automation
 | `shapefile_to_geojson` | Convert a Shapefile ZIP to GeoJSON |
 | `kml_to_geojson` | Convert KML to GeoJSON |
 | `gpx_to_geojson` | Convert GPX to GeoJSON |
+| `query_features` | Fetch feature records (attributes+geometry) from a FeatureServer layer, free preview capped at 50 |
+| `query_statistics` | Server-side aggregate stats (sum/avg/min/max/count/stddev) on a numeric field, optional group-by — no records fetched |
+| `geometry_stats` | Compute area/length/vertex count/centroid/bbox of GeoJSON (equal-area projection) |
+| `reproject_geojson` | Reproject an entire GeoJSON between EPSG coordinate systems |
+| `simplify_geometry` | Simplify GeoJSON geometry (Douglas–Peucker) |
+| `reduce_precision` | Round GeoJSON coordinates to N decimal places (shrinks payload size) |
+| `csv_to_geojson` | Convert CSV with auto-detected coordinate columns to GeoJSON |
+| `geojson_to_kml` | Convert a GeoJSON FeatureCollection to KML |
+| `geojson_to_shapefile` | Convert a GeoJSON FeatureCollection to a Shapefile ZIP |
+| `gpx_to_kml` | Convert GPX to KML |
+| `kml_to_shapefile` | Convert KML to a Shapefile ZIP |
+| `wkt_to_geojson` | Convert a WKT geometry string to GeoJSON (e.g. from PostGIS) |
+| `geojson_to_wkt` | Convert a GeoJSON geometry to a WKT string |
 
 Docs: https://gisgp.com/api · Homepage: https://gisgp.com
