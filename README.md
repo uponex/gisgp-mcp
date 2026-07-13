@@ -10,6 +10,16 @@ Free remote MCP (Model Context Protocol) server for GIS/ArcGIS Online automation
 { "mcpServers": { "gisgp": { "url": "https://gisgp.com/mcp" } } }
 ```
 
+## Local/stdio clients
+
+GISGP MCP is remote-only. For clients/registries that only support stdio,
+build the included `Dockerfile` (a thin [`mcp-remote`](https://github.com/geelen/mcp-remote)
+bridge to the endpoint above — no application code runs locally):
+
+```json
+{ "mcpServers": { "gisgp": { "command": "npx", "args": ["-y", "mcp-remote", "https://gisgp.com/mcp"] } } }
+```
+
 ## Tools (25)
 
 | Tool | Description |
