@@ -10,15 +10,27 @@ Free remote MCP (Model Context Protocol) server for GIS/ArcGIS Online automation
 { "mcpServers": { "gisgp": { "url": "https://gisgp.com/mcp" } } }
 ```
 
-## Local/stdio clients
+## Local/stdio server (open-source subset)
 
-GISGP MCP is remote-only. For clients/registries that only support stdio,
-build the included `Dockerfile` (a thin [`mcp-remote`](https://github.com/geelen/mcp-remote)
-bridge to the endpoint above — no application code runs locally):
+`server.py` is a self-contained, open-source MCP server (stdio transport)
+implementing the format-conversion and geometry tools that need no external
+service access — no ArcGIS Online credentials, no network calls. Build and
+run it with the included `Dockerfile`:
+
+```bash
+docker build -t gisgp-mcp .
+docker run -i --rm gisgp-mcp
+```
 
 ```json
-{ "mcpServers": { "gisgp": { "command": "npx", "args": ["-y", "mcp-remote", "https://gisgp.com/mcp"] } } }
+{ "mcpServers": { "gisgp-local": { "command": "docker", "args": ["run", "-i", "--rm", "gisgp-mcp"] } } }
 ```
+
+The tools that inspect/query a live ArcGIS Online FeatureServer
+(`count_features`, `extract_domains`, `check_field_types`,
+`check_service_health`, `rest_explore`, `compare_schemas`, `query_features`,
+`query_statistics`) require a real AGOL connection and stay on the hosted
+remote endpoint above — they are not part of this local server.
 
 ## Tools (25)
 
