@@ -32,6 +32,19 @@ The tools that inspect/query a live ArcGIS Online FeatureServer
 `query_statistics`) require a real AGOL connection and stay on the hosted
 remote endpoint above — they are not part of this local server.
 
+## Hosted QA tools (new, hosted endpoint only)
+
+The hosted server at `https://gisgp.com/mcp` now also exposes ArcGIS Online QA tools:
+
+| Tool | What it does |
+|---|---|
+| `grade_service` | Grade any FeatureServer A–F across 5 categories (schema, completeness, performance, maintenance, configuration) — returns a public shareable scorecard link |
+| `audit_service` | One-call QA report: health + field schema + coded domains + summary counts |
+| `find_layer_issues` | Scan a layer for problems: all-null fields, empty geometries, stale data, missing ObjectID, disabled query |
+| `share_map` | Publish a GeoJSON FeatureCollection as a live shareable web map |
+
+These require live ArcGIS/S3 infrastructure and are not part of the open-source subset below.
+
 ## Tools (25)
 
 | Tool | Description |
