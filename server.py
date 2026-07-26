@@ -15,14 +15,17 @@ https://gisgp.com/mcp — see README.md.
 
 import base64
 import csv
+import functools
 import io
 import json
+import math
 import re
 import zipfile
 from xml.etree import ElementTree as ET
 
 import gpxpy
 import shapefile  # pyshp
+import shapely
 from mcp.server.fastmcp import FastMCP
 from pyproj import Geod, Transformer
 from shapely import wkt as shapely_wkt
@@ -31,6 +34,14 @@ from shapely.geometry.polygon import orient as shapely_orient
 
 mcp = FastMCP("gisgp-mcp-oss")
 GEOD = Geod(ellps="WGS84")
+
+
+def _safe_shape(geom):
+    """Like shapely.geometry.shape(), but via shapely.from_geojson (GEOS's own
+    parser). On some numpy 2.x / shapely 2.0 builds, shape()'s vectorised
+    Multi*() constructors raise `ufunc 'create_collection' not supported` for
+    Multi* geometries — from_geojson reads through GEOS directly and avoids it."""
+    return shapely.from_geojson(json.dumps(geom))
 
 
 # ── coordinate / CRS ──────────────────────────────────────────────────────
@@ -124,7 +135,7 @@ def _validate_geojson(geojson):
             warnings.append(f"Feature {i}: null geometry")
             continue
         try:
-            shp = shape(geom)
+            shp = _safe_shape(geom)
             geom_counts[shp.geom_type] = geom_counts.get(shp.geom_type, 0) + 1
             if not shp.is_valid:
                 errors.append(f"Feature {i}: invalid/self-intersecting geometry ({shp.geom_type})")
@@ -162,11 +173,11 @@ def _count_vertices(g):
 def _geometry_stats(geojson):
     data = json.loads(geojson)
     if data.get("type") == "FeatureCollection":
-        geoms = [shape(f["geometry"]) for f in data["features"] if f.get("geometry")]
+        geoms = [_safe_shape(f["geometry"]) for f in data["features"] if f.get("geometry")]
     elif data.get("type") == "Feature":
-        geoms = [shape(data["geometry"])]
+        geoms = [_safe_shape(data["geometry"])]
     else:
-        geoms = [shape(data)]
+        geoms = [_safe_shape(data)]
     if not geoms:
         raise ValueError("No geometry found")
 
@@ -207,7 +218,7 @@ def geometry_stats(geojson: str) -> dict:
 
 def _simplify_geometry(geojson, tolerance):
     data = json.loads(geojson)
-    _apply_to_geometries(data, lambda g: g.update(mapping(shape(g).simplify(tolerance, preserve_topology=True))))
+    _apply_to_geometries(data, lambda g: g.update(mapping(_safe_shape(g).simplify(tolerance, preserve_topology=True))))
     return json.dumps(data)
 
 
@@ -230,7 +241,7 @@ def wkt_to_geojson(wkt: str) -> dict:
 def _geojson_to_wkt(geojson):
     data = json.loads(geojson)
     geom = data["geometry"] if data.get("type") == "Feature" else data
-    return shapely_wkt.dumps(shape(geom))
+    return shapely_wkt.dumps(_safe_shape(geom))
 
 
 @mcp.tool()
@@ -257,7 +268,7 @@ def _geojson_to_csv(geojson):
         props = f.get("properties") or {}
         row = [props.get(k, "") for k in prop_keys]
         geom = f.get("geometry")
-        row.append(shapely_wkt.dumps(shape(geom)) if geom else "")
+        row.append(shapely_wkt.dumps(_safe_shape(geom)) if geom else "")
         writer.writerow(row)
     return buf.getvalue()
 
@@ -485,7 +496,7 @@ def _geojson_to_shapefile(geojson):
     if not features:
         raise ValueError("No features to convert")
 
-    geom_type = shape(features[0]["geometry"]).geom_type
+    geom_type = _safe_shape(features[0]["geometry"]).geom_type
     shp_type = _SHP_TYPE_MAP.get(geom_type, shapefile.NULL)
 
     buf_shp, buf_shx, buf_dbf = io.BytesIO(), io.BytesIO(), io.BytesIO()
@@ -556,7 +567,7 @@ def _shapefile_to_geojson(shapefile_zip_base64):
     reader = shapefile.Reader(shp=shp, shx=shx, dbf=dbf)
     features = []
     for sr in reader.shapeRecords():
-        geom = mapping(shape(sr.shape.__geo_interface__))
+        geom = mapping(_safe_shape(sr.shape.__geo_interface__))
         features.append({"type": "Feature", "geometry": geom, "properties": sr.record.as_dict()})
 
     notice = None
@@ -576,6 +587,380 @@ def kml_to_shapefile(kml: str) -> dict:
     """Convert KML to a Shapefile ZIP (base64-encoded)."""
     result = _geojson_to_shapefile(_kml_to_geojson(kml))
     return {"shapefile_zip_base64": result["shapefile_zip_base64"]}
+
+
+# ── geoprocessing (buffer / dissolve / centroids / hull) ─────────────────
+
+def _fc(features):
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _geo_features(geojson):
+    data = json.loads(geojson) if isinstance(geojson, str) else geojson
+    t = data.get("type")
+    if t == "FeatureCollection":
+        return data.get("features") or []
+    if t == "Feature":
+        return [data]
+    return [{"type": "Feature", "properties": {}, "geometry": data}]
+
+
+def _union_all(shapes):
+    return functools.reduce(lambda a, b: a.union(b), shapes)
+
+
+def _aeqd_transformers(lon, lat):
+    aeqd = f"+proj=aeqd +lat_0={lat} +lon_0={lon} +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+    fwd = Transformer.from_crs("EPSG:4326", aeqd, always_xy=True).transform
+    inv = Transformer.from_crs(aeqd, "EPSG:4326", always_xy=True).transform
+    return fwd, inv
+
+
+def _buffer_geojson(geojson, distance_m):
+    from shapely.ops import transform
+    if distance_m == 0:
+        raise ValueError("distance_m must be non-zero")
+    out = []
+    for f in _geo_features(geojson):
+        g = f.get("geometry")
+        if not g:
+            continue
+        shp = _safe_shape(g)
+        if shp.is_empty:
+            continue
+        c = shp.centroid
+        fwd, inv = _aeqd_transformers(c.x, c.y)
+        buffered = transform(fwd, shp).buffer(distance_m)
+        if buffered.is_empty:
+            continue
+        out.append({"type": "Feature", "properties": f.get("properties", {}),
+                    "geometry": mapping(transform(inv, buffered))})
+    if not out:
+        raise ValueError("buffer produced no geometry (empty input or over-shrunk)")
+    return {"ok": True, "distance_m": distance_m, "geojson": _fc(out)}
+
+
+@mcp.tool()
+def buffer_geojson(geojson: str, distance_m: float) -> dict:
+    """Buffer every feature by a distance in metres (negative shrinks), geodesically accurate at any latitude."""
+    return _buffer_geojson(geojson, distance_m)
+
+
+def _dissolve_geojson(geojson, by=None):
+    groups = {}
+    for f in _geo_features(geojson):
+        g = f.get("geometry")
+        if not g:
+            continue
+        shp = _safe_shape(g)
+        if shp.is_empty:
+            continue
+        key = (f.get("properties") or {}).get(by) if by else None
+        groups.setdefault(key, []).append(shp)
+    if not groups:
+        raise ValueError("no geometry to dissolve")
+    out = []
+    for key, shapes in groups.items():
+        props = {by: key} if by else {}
+        out.append({"type": "Feature", "properties": props, "geometry": mapping(_union_all(shapes))})
+    return {"ok": True, "by": by, "group_count": len(out), "geojson": _fc(out)}
+
+
+@mcp.tool()
+def dissolve_geojson(geojson: str, by: str = "") -> dict:
+    """Merge overlapping/adjacent geometries into one, optionally grouped by a property field."""
+    return _dissolve_geojson(geojson, by or None)
+
+
+def _centroids_geojson(geojson):
+    out = []
+    for f in _geo_features(geojson):
+        g = f.get("geometry")
+        if not g:
+            continue
+        c = _safe_shape(g).centroid
+        if c.is_empty:
+            continue
+        out.append({"type": "Feature", "properties": f.get("properties", {}), "geometry": mapping(c)})
+    if not out:
+        raise ValueError("no geometry to compute centroids from")
+    return {"ok": True, "geojson": _fc(out)}
+
+
+@mcp.tool()
+def centroids_geojson(geojson: str) -> dict:
+    """Replace each feature's geometry with its centroid Point (properties kept)."""
+    return _centroids_geojson(geojson)
+
+
+def _convex_hull_geojson(geojson):
+    shapes = [_safe_shape(f["geometry"]) for f in _geo_features(geojson) if f.get("geometry")]
+    shapes = [s for s in shapes if not s.is_empty]
+    if not shapes:
+        raise ValueError("no geometry to hull")
+    hull = _union_all(shapes).convex_hull
+    return {"ok": True, "geojson": _fc([{"type": "Feature", "properties": {}, "geometry": mapping(hull)}])}
+
+
+@mcp.tool()
+def convex_hull_geojson(geojson: str) -> dict:
+    """Smallest convex polygon containing all input features combined."""
+    return _convex_hull_geojson(geojson)
+
+
+# ── overlay / join / repair / tile-math ──────────────────────────────────
+
+_OVERLAY_OPS = {"intersection", "difference", "symmetric_difference", "union"}
+
+
+def _overlay_geojson(geojson_a, geojson_b, op):
+    if op not in _OVERLAY_OPS:
+        raise ValueError(f"op must be one of {sorted(_OVERLAY_OPS)}")
+    shapes_a = [_safe_shape(f["geometry"]) for f in _geo_features(geojson_a) if f.get("geometry")]
+    shapes_b = [_safe_shape(f["geometry"]) for f in _geo_features(geojson_b) if f.get("geometry")]
+    if not shapes_a or not shapes_b:
+        raise ValueError("both inputs need at least one geometry")
+    result = getattr(_union_all(shapes_a), op)(_union_all(shapes_b))
+    feats = [] if result.is_empty else [{"type": "Feature", "properties": {}, "geometry": mapping(result)}]
+    return {"ok": True, "op": op, "geojson": _fc(feats)}
+
+
+@mcp.tool()
+def overlay_geojson(geojson_a: str, geojson_b: str, op: str = "intersection") -> dict:
+    """Boolean set operation (intersection/difference/symmetric_difference/union) between two GeoJSON inputs."""
+    return _overlay_geojson(geojson_a, geojson_b, op)
+
+
+_JOIN_PREDICATES = {"intersects", "within", "contains", "touches", "crosses", "overlaps"}
+
+
+def _spatial_join_geojson(geojson_a, geojson_b, predicate):
+    if predicate not in _JOIN_PREDICATES:
+        raise ValueError(f"predicate must be one of {sorted(_JOIN_PREDICATES)}")
+    shapes_b = [(_safe_shape(f["geometry"]), f.get("properties", {}))
+                for f in _geo_features(geojson_b) if f.get("geometry")]
+    out = []
+    matched = 0
+    for fa in _geo_features(geojson_a):
+        g = fa.get("geometry")
+        props = dict(fa.get("properties", {}))
+        matches = []
+        if g:
+            shp_a = _safe_shape(g)
+            matches = [pb for sb, pb in shapes_b if getattr(shp_a, predicate)(sb)]
+        props["_matches"] = matches
+        matched += len(matches)
+        out.append({"type": "Feature", "properties": props, "geometry": g})
+    return {"ok": True, "predicate": predicate, "match_count": matched, "geojson": _fc(out)}
+
+
+@mcp.tool()
+def spatial_join_geojson(geojson_a: str, geojson_b: str, predicate: str = "intersects") -> dict:
+    """Attach properties from every matching B feature to each A feature (as a _matches list)."""
+    return _spatial_join_geojson(geojson_a, geojson_b, predicate)
+
+
+def _nearest_features_geojson(geojson_a, geojson_b):
+    centroids_b = []
+    for f in _geo_features(geojson_b):
+        g = f.get("geometry")
+        if not g:
+            continue
+        c = _safe_shape(g).centroid
+        centroids_b.append((c.x, c.y, f.get("properties", {})))
+    if not centroids_b:
+        raise ValueError("geojson_b has no geometry")
+    out = []
+    for fa in _geo_features(geojson_a):
+        g = fa.get("geometry")
+        props = dict(fa.get("properties", {}))
+        if g:
+            ca = _safe_shape(g).centroid
+            best = min(centroids_b, key=lambda b: GEOD.inv(ca.x, ca.y, b[0], b[1])[2])
+            _, _, dist_m = GEOD.inv(ca.x, ca.y, best[0], best[1])
+            props["_nearest"] = best[2]
+            props["_nearest_distance_m"] = round(dist_m, 2)
+        out.append({"type": "Feature", "properties": props, "geometry": g})
+    return {"ok": True, "geojson": _fc(out)}
+
+
+@mcp.tool()
+def nearest_features_geojson(geojson_a: str, geojson_b: str) -> dict:
+    """For each feature in A, find the nearest feature in B by centroid-to-centroid geodesic distance."""
+    return _nearest_features_geojson(geojson_a, geojson_b)
+
+
+def _fix_geometry(geojson):
+    out = []
+    fixed_count = 0
+    for f in _geo_features(geojson):
+        g = f.get("geometry")
+        if not g:
+            out.append(f)
+            continue
+        shp = _safe_shape(g)
+        if not shp.is_valid:
+            shp = shapely.make_valid(shp)
+            fixed_count += 1
+        out.append({"type": "Feature", "properties": f.get("properties", {}), "geometry": mapping(shp)})
+    return {"ok": True, "fixed_count": fixed_count, "feature_count": len(_geo_features(geojson)), "geojson": _fc(out)}
+
+
+@mcp.tool()
+def fix_geometry(geojson: str) -> dict:
+    """Repair invalid geometries (self-intersections, bad rings) via GEOS make_valid."""
+    return _fix_geometry(geojson)
+
+
+def _geojson_diff(geojson_a, geojson_b, id_field):
+    feats_a, feats_b = _geo_features(geojson_a), _geo_features(geojson_b)
+
+    def key(f, i):
+        return (f.get("properties") or {}).get(id_field) if id_field else i
+
+    keyed_a = {key(f, i): f for i, f in enumerate(feats_a)}
+    keyed_b = {key(f, i): f for i, f in enumerate(feats_b)}
+    added = [keyed_b[k] for k in keyed_b.keys() - keyed_a.keys()]
+    removed = [keyed_a[k] for k in keyed_a.keys() - keyed_b.keys()]
+    changed, unchanged = [], 0
+    for k in keyed_a.keys() & keyed_b.keys():
+        fa, fb = keyed_a[k], keyed_b[k]
+        pa, pb = fa.get("properties") or {}, fb.get("properties") or {}
+        geom_changed = fa.get("geometry") != fb.get("geometry")
+        diffs = {p: [pa.get(p), pb.get(p)] for p in set(pa) | set(pb) if pa.get(p) != pb.get(p)}
+        if geom_changed or diffs:
+            changed.append({"id": k, "geometry_changed": geom_changed, "property_diffs": diffs})
+        else:
+            unchanged += 1
+    return {"ok": True, "added_count": len(added), "removed_count": len(removed),
+            "changed_count": len(changed), "unchanged_count": unchanged,
+            "added": added, "removed": removed, "changed": changed}
+
+
+@mcp.tool()
+def geojson_diff(geojson_a: str, geojson_b: str, id_field: str = "") -> dict:
+    """Added/removed/changed features between two GeoJSON FeatureCollections (exact structural diff)."""
+    return _geojson_diff(geojson_a, geojson_b, id_field)
+
+
+def _epsg_suggest(lon, lat):
+    if not (-180 <= lon <= 180) or not (-90 <= lat <= 90):
+        raise ValueError("lon must be in [-180,180], lat in [-90,90]")
+    zone = int((lon + 180) // 6) + 1
+    north = lat >= 0
+    epsg = (32600 if north else 32700) + zone
+    warning = "outside UTM valid latitude range (use polar stereographic instead)" if lat > 84 or lat < -80 else None
+    return {"ok": True, "epsg": epsg, "utm_zone": zone, "hemisphere": "north" if north else "south",
+            "name": f"WGS 84 / UTM zone {zone}{'N' if north else 'S'}", "warning": warning}
+
+
+@mcp.tool()
+def epsg_suggest(lon: float, lat: float) -> dict:
+    """Suggest the correct UTM EPSG code for a WGS84 lon/lat pair, for accurate metric operations."""
+    return _epsg_suggest(lon, lat)
+
+
+def _tile_math(lon, lat, zoom):
+    if not (-180 <= lon <= 180) or not (-85.0511 <= lat <= 85.0511):
+        raise ValueError("lon must be in [-180,180], lat in [-85.0511,85.0511]")
+    if not (0 <= zoom <= 22):
+        raise ValueError("zoom must be 0-22")
+    n = 2 ** zoom
+    x = int((lon + 180.0) / 360.0 * n)
+    lat_rad = math.radians(lat)
+    y = int((1.0 - math.log(math.tan(lat_rad) + 1 / math.cos(lat_rad)) / math.pi) / 2.0 * n)
+
+    def lon_at(xx):
+        return xx / n * 360.0 - 180.0
+
+    def lat_at(yy):
+        m = math.pi * (1 - 2 * yy / n)
+        return math.degrees(math.atan(math.sinh(m)))
+
+    tile_bbox = [lon_at(x), lat_at(y + 1), lon_at(x + 1), lat_at(y)]
+    quadkey = "".join(str((((y >> (zoom - i - 1)) & 1) << 1) + ((x >> (zoom - i - 1)) & 1)) for i in range(zoom))
+    return {"ok": True, "zoom": zoom, "x": x, "y": y, "tile_bbox": tile_bbox, "quadkey": quadkey}
+
+
+@mcp.tool()
+def tile_math(lon: float, lat: float, zoom: int) -> dict:
+    """Convert lon/lat + zoom to Slippy Map (XYZ) tile x/y, that tile's bbox, and its Bing quadkey."""
+    return _tile_math(lon, lat, zoom)
+
+
+def _envelope_geojson(geojson):
+    out = []
+    for f in _geo_features(geojson):
+        g = f.get("geometry")
+        if not g:
+            continue
+        out.append({"type": "Feature", "properties": f.get("properties", {}),
+                    "geometry": mapping(_safe_shape(g).envelope)})
+    if not out:
+        raise ValueError("no geometry to envelope")
+    return {"ok": True, "geojson": _fc(out)}
+
+
+@mcp.tool()
+def envelope_geojson(geojson: str) -> dict:
+    """Bounding-box rectangle (envelope) per feature, properties kept."""
+    return _envelope_geojson(geojson)
+
+
+def _minimum_rotated_rectangle(geojson):
+    shapes = [_safe_shape(f["geometry"]) for f in _geo_features(geojson) if f.get("geometry")]
+    if not shapes:
+        raise ValueError("no geometry to rectangle")
+    mrr = _union_all(shapes).minimum_rotated_rectangle
+    return {"ok": True, "geojson": _fc([{"type": "Feature", "properties": {}, "geometry": mapping(mrr)}])}
+
+
+@mcp.tool()
+def minimum_rotated_rectangle(geojson: str) -> dict:
+    """Smallest-area rotated rectangle containing all input features combined."""
+    return _minimum_rotated_rectangle(geojson)
+
+
+def _voronoi_geojson(geojson):
+    points = []
+    for f in _geo_features(geojson):
+        g = f.get("geometry")
+        if not g:
+            continue
+        shp = _safe_shape(g)
+        points.append(shp if shp.geom_type == "Point" else shp.centroid)
+    if len(points) < 2:
+        raise ValueError("need at least 2 points for a Voronoi diagram")
+    multipoint = shapely_wkt.loads("MULTIPOINT (" + ", ".join(f"{p.x} {p.y}" for p in points) + ")")
+    cells = shapely.voronoi_polygons(multipoint)
+    out = [{"type": "Feature", "properties": {}, "geometry": mapping(c)} for c in cells.geoms]
+    return {"ok": True, "cell_count": len(out), "geojson": _fc(out)}
+
+
+@mcp.tool()
+def voronoi_geojson(geojson: str) -> dict:
+    """Voronoi diagram of the input points (non-point features use their centroid)."""
+    return _voronoi_geojson(geojson)
+
+
+# ── composite one-call report ─────────────────────────────────────────────
+
+@mcp.tool()
+def geometry_health_report(geojson: str) -> dict:
+    """One-call GeoJSON health check: validate + auto-repair invalid geometry + stats + bbox envelope."""
+    report = _validate_geojson(geojson)
+    fix_out = _fix_geometry(geojson)
+    fixed_geojson = fix_out["geojson"]
+    return {
+        "ok": True,
+        "valid": report.get("valid"),
+        "errors": report.get("errors"),
+        "warnings": report.get("warnings"),
+        "fixed_count": fix_out.get("fixed_count"),
+        "stats": _geometry_stats(json.dumps(fixed_geojson)),
+        "envelope": _envelope_geojson(fixed_geojson).get("geojson"),
+        "geojson": fixed_geojson,
+    }
 
 
 if __name__ == "__main__":
