@@ -46,13 +46,23 @@ need a live AGOL connection and can't run in this local/stdio server:
 | `full_service_audit` | Merges grade_service + audit_service + find_layer_issues into a single call |
 | `count_features` / `extract_domains` / `check_field_types` / `check_service_health` / `rest_explore` / `compare_schemas` / `query_features` / `query_statistics` | Inspect/query a live ArcGIS FeatureServer |
 
-Also hosted-only: `get_terrain_profile`, `get_climate_history`, `analyze_location` — free
-geo primitives backed by third-party open-data APIs (Open-Meteo, OSM Nominatim), kept on
-the hosted endpoint rather than this offline server since they need outbound internet
-access to those services.
+Also hosted-only: `get_terrain_profile`, `get_climate_history`, `classify_land_cover`,
+`analyze_location` — free geo primitives backed by third-party open-data APIs
+(Open-Meteo, ESA CCI Land Cover, OSM Nominatim), kept on the hosted endpoint rather
+than this offline server since they need outbound internet access to those services.
 
-These require live infrastructure (ArcGIS/S3, or third-party APIs) and are not part of
-the open-source subset below — everything below runs fully offline.
+### Layer 2 — paid tools (hosted endpoint only)
+
+| Tool | What it does |
+|---|---|
+| `estimate_cost` | Free — quote a paid tool's credit cost without executing it |
+| `check_wallet_balance` | Free — check your own MCP credits balance (needs an API key) |
+| `assess_property_hazard` | Paid, 8800 credits (€8.80) — seismic risk indicator (USGS National Seismic Hazard Model), charged via credits wallet |
+| `assess_property_hazard_x402` | Paid, ~$8.80 via the x402 protocol — same seismic risk data, paid directly in USDC on-chain (Base), no GISGP account needed |
+
+These require live infrastructure (ArcGIS/S3, DynamoDB credits wallet, or third-party
+APIs) and are not part of the open-source subset below — everything below runs fully
+offline.
 
 ## Tools (32)
 
