@@ -57,8 +57,8 @@ than this offline server since they need outbound internet access to those servi
 |---|---|
 | `estimate_cost` | Free — quote a paid tool's credit cost without executing it |
 | `check_wallet_balance` | Free — check your own MCP credits balance (needs an API key) |
-| `assess_property_hazard` | Paid, 8800 credits (€8.80) — seismic risk indicator (USGS National Seismic Hazard Model), charged via credits wallet |
-| `assess_property_hazard_x402` | Paid, ~$8.80 via the x402 protocol — same seismic risk data, paid directly in USDC on-chain (Base), no GISGP account needed |
+| `assess_property_hazard` | Paid, 200 credits (€0.20) — multi-source US property hazard: USGS seismic risk + FEMA 10-year disaster history + NOAA active weather alerts, charged via credits wallet |
+| `assess_property_hazard_x402` | Paid, ~$0.20 via the x402 protocol — same multi-source hazard data, paid directly in USDC on-chain (Base), no GISGP account needed |
 
 These require live infrastructure (ArcGIS/S3, DynamoDB credits wallet, or third-party
 APIs) and are not part of the open-source subset below — everything below runs fully
