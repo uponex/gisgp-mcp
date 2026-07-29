@@ -1,5 +1,7 @@
 # GISGP MCP Server
 
+[![Glama MCP Server](https://glama.ai/mcp/servers/uponex/gisgp-mcp/badge)](https://glama.ai/mcp/servers/uponex/gisgp-mcp)
+
 Free remote MCP (Model Context Protocol) server for GIS/ArcGIS Online automation.
 
 **Endpoint:** `https://gisgp.com/mcp` (Streamable HTTP, stateless, no auth for public layers)
