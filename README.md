@@ -66,7 +66,11 @@ These require live infrastructure (ArcGIS/S3, DynamoDB credits wallet, or third-
 APIs) and are not part of the open-source subset below — everything below runs fully
 offline.
 
-## Tools (32)
+## Tools
+
+32 tools in this local/offline server subset (see the hosted-only sections
+above for the full 78-tool catalog including AGOL QA/query tools and Layer 2
+paid tools).
 
 | Tool | Description |
 |---|---|
