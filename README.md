@@ -1,6 +1,7 @@
 # GISGP MCP Server
 
 [![Glama MCP Server](https://glama.ai/mcp/servers/uponex/gisgp-mcp/badge)](https://glama.ai/mcp/servers/uponex/gisgp-mcp)
+[![MCP Queen operational grade](https://mcpqueen.com/badge/io.github.uponex/gisgp.svg)](https://mcpqueen.com/s/io.github.uponex/gisgp)
 
 Free remote MCP (Model Context Protocol) server for GIS/ArcGIS Online automation.
 
