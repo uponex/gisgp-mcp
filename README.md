@@ -107,4 +107,6 @@ paid tools).
 | `voronoi_geojson` | Voronoi diagram of the input points |
 | `geometry_health_report` | One-call health check: validate + auto-repair + stats + envelope, merged |
 
+Cookbook: real task -> tool call examples in [COOKBOOK.md](COOKBOOK.md)
+
 Docs: https://gisgp.com/api · Homepage: https://gisgp.com
