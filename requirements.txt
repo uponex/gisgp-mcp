@@ -1,4 +1,4 @@
-mcp>=1.0.0
+mcp==1.28.1
 pyproj>=3.6
 shapely>=2.0
 pyshp>=2.3

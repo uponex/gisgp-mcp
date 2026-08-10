@@ -963,5 +963,432 @@ def geometry_health_report(geojson: str) -> dict:
     }
 
 
+# ── DXF (AutoCAD) ─────────────────────────────────────────────────────────
+# Ported from the hosted server's dxf_service.py (2026-08-10) — same scope:
+# POINT/LINE/LWPOLYLINE/POLYLINE/ARC/CIRCLE entities, arcs/circles
+# tessellated into LineString/Polygon. Splines/text/hatches/3D solids have
+# no GIS geometry equivalent and are skipped, not errored on. Pure text
+# parsing, no network/AGOL dependency — fits this offline server's scope.
+
+def _dxf_tessellate_arc(cx, cy, r, start_deg, end_deg, segments=32):
+    if end_deg < start_deg:
+        end_deg += 360
+    coords = []
+    for i in range(segments + 1):
+        a = math.radians(start_deg + (end_deg - start_deg) * i / segments)
+        coords.append([cx + r * math.cos(a), cy + r * math.sin(a)])
+    return coords
+
+
+def _dxf_tessellate_circle(cx, cy, r, segments=64):
+    coords = []
+    for i in range(segments):
+        a = math.radians(360 * i / segments)
+        coords.append([cx + r * math.cos(a), cy + r * math.sin(a)])
+    coords.append(coords[0])
+    return coords
+
+
+def _dxf_append_line_or_polygon(features, coords, closed, layer="0"):
+    if len(coords) < 2:
+        return
+    if closed:
+        ring = coords if coords[0] == coords[-1] else coords + [coords[0]]
+        features.append({"type": "Feature", "properties": {"layer": layer},
+                         "geometry": {"type": "Polygon", "coordinates": [ring]}})
+    else:
+        features.append({"type": "Feature", "properties": {"layer": layer},
+                         "geometry": {"type": "LineString", "coordinates": coords}})
+
+
+def _dxf_to_geojson(text, layer=None):
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    pairs = []
+    i = 0
+    while i + 1 < len(lines):
+        try:
+            code = int(lines[i].strip())
+        except ValueError:
+            i += 2
+            continue
+        pairs.append((code, lines[i + 1].strip()))
+        i += 2
+
+    features = []
+    i, n = 0, len(pairs)
+    while i < n:
+        code, val = pairs[i]
+        if code != 0:
+            i += 1
+            continue
+
+        if val == "POINT":
+            x = y = None
+            ent_layer = "0"
+            i += 1
+            while i < n and pairs[i][0] != 0:
+                c, v = pairs[i]
+                if c == 10: x = float(v)
+                elif c == 20: y = float(v)
+                elif c == 8: ent_layer = v
+                i += 1
+            if x is not None and y is not None:
+                features.append({"type": "Feature", "properties": {"layer": ent_layer},
+                                 "geometry": {"type": "Point", "coordinates": [x, y]}})
+
+        elif val == "LINE":
+            x1 = y1 = x2 = y2 = None
+            ent_layer = "0"
+            i += 1
+            while i < n and pairs[i][0] != 0:
+                c, v = pairs[i]
+                if c == 10: x1 = float(v)
+                elif c == 20: y1 = float(v)
+                elif c == 11: x2 = float(v)
+                elif c == 21: y2 = float(v)
+                elif c == 8: ent_layer = v
+                i += 1
+            if x1 is not None and x2 is not None:
+                features.append({"type": "Feature", "properties": {"layer": ent_layer},
+                                 "geometry": {"type": "LineString", "coordinates": [[x1, y1], [x2, y2]]}})
+
+        elif val == "CIRCLE":
+            cx = cy = r = None
+            ent_layer = "0"
+            i += 1
+            while i < n and pairs[i][0] != 0:
+                c, v = pairs[i]
+                if c == 10: cx = float(v)
+                elif c == 20: cy = float(v)
+                elif c == 40: r = float(v)
+                elif c == 8: ent_layer = v
+                i += 1
+            if cx is not None and cy is not None and r:
+                features.append({"type": "Feature", "properties": {"layer": ent_layer},
+                                 "geometry": {"type": "Polygon", "coordinates": [_dxf_tessellate_circle(cx, cy, r)]}})
+
+        elif val == "ARC":
+            cx = cy = r = start = end = None
+            ent_layer = "0"
+            i += 1
+            while i < n and pairs[i][0] != 0:
+                c, v = pairs[i]
+                if c == 10: cx = float(v)
+                elif c == 20: cy = float(v)
+                elif c == 40: r = float(v)
+                elif c == 50: start = float(v)
+                elif c == 51: end = float(v)
+                elif c == 8: ent_layer = v
+                i += 1
+            if None not in (cx, cy, r, start, end):
+                features.append({"type": "Feature", "properties": {"layer": ent_layer},
+                                 "geometry": {"type": "LineString",
+                                              "coordinates": _dxf_tessellate_arc(cx, cy, r, start, end)}})
+
+        elif val == "LWPOLYLINE":
+            closed = False
+            coords = []
+            cur_x = None
+            ent_layer = "0"
+            i += 1
+            while i < n and pairs[i][0] != 0:
+                c, v = pairs[i]
+                if c == 70: closed = (int(v) & 1) == 1
+                elif c == 10: cur_x = float(v)
+                elif c == 20 and cur_x is not None:
+                    coords.append([cur_x, float(v)])
+                    cur_x = None
+                elif c == 8: ent_layer = v
+                i += 1
+            _dxf_append_line_or_polygon(features, coords, closed, ent_layer)
+
+        elif val == "POLYLINE":
+            closed = False
+            ent_layer = "0"
+            i += 1
+            while i < n and pairs[i][0] != 0:
+                c, v = pairs[i]
+                if c == 70: closed = (int(v) & 1) == 1
+                elif c == 8: ent_layer = v
+                i += 1
+            coords = []
+            while i < n and not (pairs[i][0] == 0 and pairs[i][1] == "SEQEND"):
+                if pairs[i][0] == 0 and pairs[i][1] == "VERTEX":
+                    vx = vy = None
+                    i += 1
+                    while i < n and pairs[i][0] != 0:
+                        c, v = pairs[i]
+                        if c == 10: vx = float(v)
+                        elif c == 20: vy = float(v)
+                        i += 1
+                    if vx is not None and vy is not None:
+                        coords.append([vx, vy])
+                else:
+                    i += 1
+            if i < n and pairs[i][1] == "SEQEND":
+                i += 1
+            _dxf_append_line_or_polygon(features, coords, closed, ent_layer)
+
+        else:
+            i += 1
+
+    if layer:
+        features = [f for f in features if f["properties"].get("layer") == layer]
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+@mcp.tool()
+def dxf_to_geojson(dxf: str, layer: str = "") -> str:
+    """Convert an AutoCAD DXF file's contents to GeoJSON. POINT/LINE/LWPOLYLINE/
+    POLYLINE/ARC/CIRCLE entities convert (arcs/circles tessellated into
+    LineString/Polygon). Every feature's properties.layer carries its DXF
+    layer name (group code 8). Pass `layer` to return only that layer's
+    entities — see list_dxf_layers to discover what layer names exist."""
+    return json.dumps(_dxf_to_geojson(dxf, layer=layer or None))
+
+
+def _geojson_to_dxf(geojson):
+    data = json.loads(geojson) if isinstance(geojson, str) else geojson
+    features_in = data["features"] if data.get("type") == "FeatureCollection" else [data]
+    entities = []
+
+    def add_point(x, y, layer):
+        entities.append(f"0\nPOINT\n8\n{layer}\n10\n{x}\n20\n{y}\n30\n0.0")
+
+    def add_polyline(coords, closed, layer):
+        header = f"0\nLWPOLYLINE\n8\n{layer}\n90\n{len(coords)}\n70\n{1 if closed else 0}"
+        pts = "\n".join(f"10\n{c[0]}\n20\n{c[1]}" for c in coords)
+        entities.append(header + "\n" + pts)
+
+    def walk(geom, layer):
+        if not geom:
+            return
+        t, c = geom.get("type"), geom.get("coordinates")
+        if t == "Point":
+            add_point(c[0], c[1], layer)
+        elif t == "MultiPoint":
+            for p in c: add_point(p[0], p[1], layer)
+        elif t == "LineString":
+            add_polyline(c, False, layer)
+        elif t == "MultiLineString":
+            for line in c: add_polyline(line, False, layer)
+        elif t == "Polygon":
+            for ring in c: add_polyline(ring, True, layer)
+        elif t == "MultiPolygon":
+            for poly in c:
+                for ring in poly: add_polyline(ring, True, layer)
+
+    for f in features_in:
+        layer = str((f.get("properties") or {}).get("layer") or "0")
+        walk(f.get("geometry"), layer)
+
+    body = "\n".join(entities)
+    return "0\nSECTION\n2\nENTITIES\n" + (body + "\n" if body else "") + "0\nENDSEC\n0\nEOF\n"
+
+
+@mcp.tool()
+def geojson_to_dxf(geojson: str) -> str:
+    """Convert GeoJSON to an AutoCAD DXF file. Points become DXF POINT
+    entities; lines and polygon rings become LWPOLYLINE entities. A
+    feature's properties.layer (if present) is written back as the DXF
+    entity's layer (group code 8), defaulting to layer "0" otherwise."""
+    return _geojson_to_dxf(geojson)
+
+
+@mcp.tool()
+def list_dxf_layers(dxf: str) -> dict:
+    """List the distinct DXF layer names used in a drawing, sorted
+    alphabetically — use with dxf_to_geojson's `layer` param to extract
+    just one."""
+    geo = _dxf_to_geojson(dxf)
+    layers = sorted({f["properties"].get("layer", "0") for f in geo["features"]})
+    return {"layers": layers}
+
+
+@mcp.tool()
+def georeference_dxf(dxf: str, control_points: str) -> str:
+    """Reproject a DXF drawn in a local/arbitrary CAD coordinate system into
+    real-world coordinates. Give exactly 2 control points as a JSON array:
+    '[{"local":[x,y],"real":[lon,lat]}, {"local":[x,y],"real":[lon,lat]}]'
+    — a 2-point similarity transform (uniform scale + rotation +
+    translation) is solved and applied to every coordinate. Returns a
+    GeoJSON FeatureCollection in the real coordinate system implied by the
+    2 points."""
+    points = json.loads(control_points)
+    if len(points) != 2:
+        raise ValueError("georeference_dxf needs exactly 2 control points")
+    (x1, y1), (X1, Y1) = points[0]["local"], points[0]["real"]
+    (x2, y2), (X2, Y2) = points[1]["local"], points[1]["real"]
+
+    dxl, dyl = x2 - x1, y2 - y1
+    local_len2 = dxl * dxl + dyl * dyl
+    if local_len2 == 0:
+        raise ValueError("the 2 control points' local coordinates are identical")
+    dxr, dyr = X2 - X1, Y2 - Y1
+    a = (dxl * dxr + dyl * dyr) / local_len2
+    b = (dxl * dyr - dyl * dxr) / local_len2
+    tx = X1 - (a * x1 - b * y1)
+    ty = Y1 - (b * x1 + a * y1)
+
+    def transform_point(pt):
+        x, y = pt[0], pt[1]
+        return [a * x - b * y + tx, b * x + a * y + ty]
+
+    def transform_coords(coords):
+        if isinstance(coords[0], (int, float)):
+            return transform_point(coords)
+        return [transform_coords(c) for c in coords]
+
+    geo = _dxf_to_geojson(dxf)
+    for f in geo["features"]:
+        geom = f.get("geometry")
+        if geom and geom.get("coordinates"):
+            geom["coordinates"] = transform_coords(geom["coordinates"])
+    return json.dumps(geo)
+
+
+# ── GeoJSON -> GPX ───────────────────────────────────────────────────────
+# gpx_to_geojson/gpx_to_kml above only ever go GPX->other — this reverse
+# direction (2026-08-10) fills a real gap found while wiring DXF->GPX.
+
+def _geojson_to_gpx(geojson):
+    data = json.loads(geojson) if isinstance(geojson, str) else geojson
+    features_in = data["features"] if data.get("type") == "FeatureCollection" else [data]
+
+    def pt_tag(tag, coords, name=""):
+        lat, lon = coords[1], coords[0]
+        inner = f"<ele>{coords[2]}</ele>" if len(coords) >= 3 else ""
+        if name:
+            inner += f"<name>{name}</name>"
+        if inner:
+            return f'<{tag} lat="{lat}" lon="{lon}">{inner}</{tag}>'
+        return f'<{tag} lat="{lat}" lon="{lon}"/>'
+
+    def track(name, coords):
+        pts = "".join(pt_tag("trkpt", c) for c in coords)
+        name_el = f"<name>{name}</name>" if name else ""
+        return f"<trk>{name_el}<trkseg>{pts}</trkseg></trk>"
+
+    wpts, trks = [], []
+    for f in features_in:
+        geom = f.get("geometry") or {}
+        gtype, coords = geom.get("type"), geom.get("coordinates")
+        if not coords:
+            continue
+        props = f.get("properties") or {}
+        name = props.get("name") or props.get("Name") or ""
+        if gtype == "Point":
+            wpts.append(pt_tag("wpt", coords, name))
+        elif gtype == "MultiPoint":
+            for c in coords:
+                wpts.append(pt_tag("wpt", c))
+        elif gtype == "LineString":
+            trks.append(track(name, coords))
+        elif gtype == "MultiLineString":
+            for line in coords:
+                trks.append(track(name, line))
+        elif gtype == "Polygon":
+            trks.append(track(name, coords[0]))
+        elif gtype == "MultiPolygon":
+            for poly in coords:
+                trks.append(track(name, poly[0]))
+
+    return ('<?xml version="1.0" encoding="UTF-8"?>'
+            '<gpx version="1.1" creator="GISGP.com" xmlns="http://www.topografix.com/GPX/1/1">'
+            + "".join(wpts) + "".join(trks) + "</gpx>")
+
+
+@mcp.tool()
+def geojson_to_gpx(geojson: str) -> str:
+    """Convert GeoJSON to a GPX file. Points become GPX waypoints; lines
+    and polygon rings become GPX tracks (GPX has no native polygon type).
+    Non-name properties are dropped — GPX has no generic attribute-table
+    equivalent."""
+    return _geojson_to_gpx(geojson)
+
+
+# ── coordinate utilities ───────────────────────────────────────────────
+
+@mcp.tool()
+def offset_coordinates(lon: float, lat: float, distance_m: float, bearing_deg: float) -> dict:
+    """Move a WGS84 point by a geodesic distance (metres) along a compass
+    bearing (0=N, 90=E, 180=S, 270=W)."""
+    if not (-180 <= lon <= 180) or not (-90 <= lat <= 90):
+        raise ValueError("lon must be in [-180,180], lat in [-90,90]")
+    if not (0 <= bearing_deg < 360):
+        raise ValueError("bearing_deg must be in [0,360)")
+    new_lon, new_lat, _ = GEOD.fwd(lon, lat, bearing_deg, distance_m)
+    return {"ok": True, "lon": new_lon, "lat": new_lat,
+            "origin_lon": lon, "origin_lat": lat,
+            "distance_m": distance_m, "bearing_deg": bearing_deg,
+            "source": "pyproj geodesic (WGS84 ellipsoid)"}
+
+
+_UNAMBIGUOUS_LON_THRESHOLD = 90.0
+
+
+@mcp.tool()
+def detect_coordinate_order(points: list) -> dict:
+    """Detect whether [x, y] pairs are [lon, lat] or [lat, lon]. Certain
+    when any value exceeds ±90 (only longitude can); honestly reports
+    'inconclusive' otherwise, never a fabricated guess."""
+    if not points:
+        raise ValueError("points must be a non-empty list")
+    first_over_90 = any(abs(p[0]) > _UNAMBIGUOUS_LON_THRESHOLD for p in points)
+    second_over_90 = any(abs(p[1]) > _UNAMBIGUOUS_LON_THRESHOLD for p in points)
+    if first_over_90 and second_over_90:
+        return {"ok": False, "error": "inconsistent data: both columns contain values "
+                                      "outside ±90, neither can be latitude"}
+    if first_over_90:
+        order, confidence = "lon,lat", "certain"
+    elif second_over_90:
+        order, confidence = "lat,lon", "certain"
+    else:
+        order, confidence = "lon,lat", "inconclusive"
+    return {
+        "ok": True, "order": order, "confidence": confidence,
+        "note": ("Both values stay within ±90 for every point — order cannot be "
+                 "determined from range alone, 'lon,lat' is the GeoJSON/most-common "
+                 "convention default, not a verified detection."
+                 if confidence == "inconclusive" else
+                 "At least one value exceeds ±90, which only longitude can do — order is certain."),
+    }
+
+
+_CRS_RANGE_GUESSES = [
+    (4326, "WGS 84 (lon/lat, degrees)", lambda x, y: -180 <= x <= 180 and -90 <= y <= 90),
+    (3857, "WGS 84 / Pseudo-Mercator (Web Mercator, metres)",
+     lambda x, y: (abs(x) > 180 or abs(y) > 90)
+     and -20037509 <= x <= 20037509 and -20048967 <= y <= 20048967),
+]
+
+
+@mcp.tool()
+def guess_crs_from_coordinates(points: list) -> dict:
+    """Best-guess candidate CRS for raw [x, y] coordinates with no metadata
+    (e.g. a shapefile with a missing .prj). Genuinely ambiguous by nature —
+    returns ranked candidates with an honest caveat, never a single
+    confident answer."""
+    if not points:
+        raise ValueError("points must be a non-empty list")
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    candidates = []
+    for epsg, name, test in _CRS_RANGE_GUESSES:
+        if all(test(x, y) for x, y in zip(xs, ys)):
+            candidates.append({"epsg": epsg, "name": name})
+    if not candidates:
+        candidates.append({"epsg": None, "name": "No common CRS range matched — likely a "
+                           "regional/local projected CRS (e.g. UTM, State Plane); check units "
+                           "and approximate origin manually."})
+    return {
+        "ok": True, "x_range": [min(xs), max(xs)], "y_range": [min(ys), max(ys)],
+        "candidates": candidates,
+        "note": "Best-guess ranked candidates from coordinate range alone — not a certain "
+                "identification. Many projected CRSs share similar ranges.",
+    }
+
+
 if __name__ == "__main__":
     mcp.run()

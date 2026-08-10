@@ -54,6 +54,29 @@ PostGIS/SQL geometry columns print as WKT (Well-Known Text) by default:
 The reverse direction (`geojson_to_wkt`) works for inserting a GeoJSON
 geometry back into a PostGIS `INSERT`/`UPDATE`.
 
+## "Convert this AutoCAD DXF to GeoJSON" (or the reverse)
+
+```json
+{"tool": "dxf_to_geojson", "arguments": {"dxf": "<contents of the .dxf file>"}}
+```
+POINT/LINE/LWPOLYLINE/POLYLINE/ARC/CIRCLE entities convert (arcs/circles
+tessellated into LineString/Polygon); the DXF layer name is kept as each
+feature's `layer` property. `geojson_to_dxf` does the reverse. If the DXF
+uses multiple layers, `list_dxf_layers` shows what's there before you
+filter with `dxf_to_geojson`'s `layer` argument.
+
+## "This DXF isn't in real-world coordinates, fix it"
+
+Real CAD drawings are usually in a local/arbitrary coordinate system, not
+lon/lat. Give 2 points whose real-world location you know:
+
+```json
+{"tool": "georeference_dxf", "arguments": {"dxf": "<contents of the .dxf file>",
+  "control_points": "[{\"local\":[0,0],\"real\":[-88.0,42.0]},{\"local\":[100,0],\"real\":[-87.99,42.0]}]"}}
+```
+Solves a 2-point similarity transform (scale + rotation + translation) and
+applies it to every coordinate in the drawing.
+
 ## "Find the center point of every parcel/building in this layer"
 
 ```json

@@ -68,8 +68,8 @@ offline.
 
 ## Tools
 
-32 tools in this local/offline server subset (see the hosted-only sections
-above for the full 78-tool catalog including AGOL QA/query tools and Layer 2
+40 tools in this local/offline server subset (see the hosted-only sections
+above for the full 92-tool catalog including AGOL QA/query tools and Layer 2
 paid tools).
 
 | Tool | Description |
@@ -106,6 +106,14 @@ paid tools).
 | `minimum_rotated_rectangle` | Smallest-area rotated rectangle containing all input features combined |
 | `voronoi_geojson` | Voronoi diagram of the input points |
 | `geometry_health_report` | One-call health check: validate + auto-repair + stats + envelope, merged |
+| `dxf_to_geojson` | Convert an AutoCAD DXF file to GeoJSON (POINT/LINE/LWPOLYLINE/POLYLINE/ARC/CIRCLE, layer name kept as a property) |
+| `geojson_to_dxf` | Convert GeoJSON to an AutoCAD DXF file |
+| `list_dxf_layers` | List the distinct layer names used in a DXF drawing |
+| `georeference_dxf` | Reproject a DXF's local/arbitrary drawing coordinates to real-world lon/lat via a 2-point similarity transform |
+| `geojson_to_gpx` | Convert GeoJSON to a GPX file (points -> waypoints, lines/polygon rings -> tracks) |
+| `offset_coordinates` | Move a WGS84 point by a geodesic distance and bearing |
+| `detect_coordinate_order` | Detect whether [x, y] pairs are [lon, lat] or [lat, lon] |
+| `guess_crs_from_coordinates` | Best-guess candidate CRS for raw coordinates with no metadata (e.g. missing .prj) |
 
 Cookbook: real task -> tool call examples in [COOKBOOK.md](COOKBOOK.md)
 
